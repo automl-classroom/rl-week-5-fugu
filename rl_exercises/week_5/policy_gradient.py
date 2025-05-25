@@ -1,5 +1,7 @@
 from typing import Any, Dict, List, Tuple
 
+from collections import deque
+
 import gymnasium as gym
 import hydra
 import numpy as np
@@ -72,6 +74,8 @@ class Policy(nn.Module):
         # TODO: Define two linear layers: self.fc1 and self.fc2
         # self.fc1 should map from self.state_dim to hidden_size
         # self.fc2 should map from hidden_size to self.n_actions
+        self.fc1 = nn.Linear(self.state_dim, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, self.n_actions)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -90,7 +94,11 @@ class Policy(nn.Module):
         # TODO: Apply fc1 followed by ReLU (Flatten input if needed)
         # TODO: Apply fc2 to get logits
         # TODO: Return softmax over logits along the last dimension
-        pass
+        hidden = self.fc1(x)
+        hidden = torch.relu(hidden)
+        logits = self.fc2(hidden)
+        probs = torch.softmax(logits, dim=-1)
+        return probs
 
 
 class REINFORCEAgent(AbstractAgent):
@@ -164,7 +172,17 @@ class REINFORCEAgent(AbstractAgent):
         # TODO: Pass state through the policy network to get action probabilities
         # If evaluate is True, return the action with highest probability
         # Otherwise, sample from the action distribution and return the log-probability as a key in the dictionary (Hint: use torch.distributions.Categorical)
-        return 0, {}  # Placeholder return value
+        state_tensor = torch.as_tensor(state, dtype=torch.float32)
+        action_probs = self.policy(state_tensor).squeeze(0)
+
+        if evaluate:
+            action = int(torch.argmax(action_probs).item())
+            return action, {}
+        else:
+            m = torch.distributions.Categorical(action_probs)
+            action = m.sample()
+            log_prob = m.log_prob(action)
+            return int(action.item()), {"log_prob": log_prob}
 
     def compute_returns(self, rewards: List[float]) -> torch.Tensor:
         """
@@ -186,7 +204,12 @@ class REINFORCEAgent(AbstractAgent):
         #       - Update R = r + gamma * R
         #       - Insert R at the beginning of the returns list
         # TODO: Convert the list of returns to a torch.Tensor and return
-        pass
+        returns = deque([])
+        R = 0
+        for r in rewards:
+            R = r + self.gamma * R
+            returns.appendleft(R)
+        return torch.tensor(returns, dtype=torch.float32)
 
     def update_agent(
         self,
@@ -216,7 +239,7 @@ class REINFORCEAgent(AbstractAgent):
 
         # TODO: Normalize returns with mean and standard deviation,
         # and add 1e-8 to the denominator to avoid division by zero
-        norm_returns = returns_t
+        norm_returns = (returns_t - returns_t.mean()) / (returns_t.std() + 1e-8)
 
         lp_tensor = torch.stack(log_probs)
         loss = -torch.sum(lp_tensor * norm_returns)
@@ -280,11 +303,22 @@ class REINFORCEAgent(AbstractAgent):
         self.policy.eval()
         returns: List[float] = []  # noqa: F841
         # TODO: rollout num_episodes in eval_env and aggregate undiscounted returns across episodes
+        for _ in range(num_episodes):
+            state, _ = eval_env.reset()
+            done = False
+            ep_return = 0.0
+            while not done:
+                action, _ = self.predict_action(state, evaluate=True)
+                next_state, reward, term, trunc, _ = eval_env.step(action)
+                done = term or trunc
+                ep_return += reward
+                state = next_state
+            returns.append(ep_return)
 
         self.policy.train()  # Set back to training mode
 
         # TODO: Return the mean and std of the returns across episodes
-        return 0.0, 0.0
+        return float(np.mean(returns)), float(np.std(returns))
 
     def train(
         self,
@@ -324,13 +358,13 @@ class REINFORCEAgent(AbstractAgent):
 
             if ep % eval_interval == 0:
                 mean_ret, std_ret = self.evaluate(eval_env, num_episodes=eval_episodes)
-                print(f"[Eval ] Ep {ep:3d} AvgReturn {mean_ret:5.1f} ± {std_ret:4.1f}")
+                print(f"[Eval] Ep {ep:3d} AvgReturn {mean_ret:5.1f} ± {std_ret:4.1f}")
 
         print("Training complete.")
 
 
 @hydra.main(
-    config_path="../configs/agent/", config_name="reinforce", version_base="1.1"
+    config_path="../configs/agent/", config_name="reinforce_sweep", version_base="1.1"
 )
 def main(cfg: DictConfig) -> None:
     """
@@ -371,6 +405,24 @@ def main(cfg: DictConfig) -> None:
         eval_interval=cfg.train.eval_interval,
         eval_episodes=cfg.train.eval_episodes,
     )
+
+    # path = "agent"
+    # agent.save(path=path)
+
+    # eval_env = gym.make(cfg.env.name, render_mode='human')
+    # eval_env.metadata['render_fps'] = 120
+
+    # eval_agent = REINFORCEAgent(
+    #    env=eval_env,
+    #    lr=cfg.agent.lr,
+    #    gamma=cfg.agent.gamma,
+    #    seed=cfg.seed,
+    #    hidden_size=cfg.agent.hidden_size,
+    # )
+    # eval_agent.load(path=path)
+
+    # mean_ret, std_ret = eval_agent.evaluate(eval_env=eval_env, num_episodes=10)
+    # print(f"[Final Eval] AvgReturn {mean_ret:5.1f} ± {std_ret:4.1f}")
 
 
 if __name__ == "__main__":
